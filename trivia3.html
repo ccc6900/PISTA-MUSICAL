@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PISTA MUSICAL BISIMBRE</title>
+    <script src="https://cdn.ably.com/lib/ably.min-1.js"></script>
+    <style>
+        :root {
+            --bg: #141419;
+            --txt: #ffffff;
+            --btn: #2ecc71;
+            --bad: #e74c3c;
+            --neu: #34495e;
+            --warn: #f1c40f;
+        }
+        body {
+            font-family: sans-serif;
+            background: var(--bg);
+            color: var(--txt);
+            text-align: center;
+            padding: 10px;
+            margin: 0;
+        }
+        .btn {
+            background: var(--neu);
+            color: white;
+            border: none;
+            padding: 14px;
+            margin: 6px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            width: 90%;
+            max-width: 290px;
+        }
+        .btn-go { background: var(--btn); }
+        .btn-stop { background: var(--bad); }
+        .btn-warn { background: var(--warn); color:#000; }
+        #pad {
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            background: var(--bad);
+            color: white;
+            font-size: 22px;
+            font-weight: bold;
+            border: 10px solid #cbd5e1;
+            margin: 25px auto;
+            cursor: pointer;
+        }
+        #pad:disabled {
+            background: #7f8c8d;
+            cursor: not-allowed;
+        }
+        .box {
+            background: rgba(255,255,255,0.08);
+            padding: 12px;
+            border-radius: 8px;
+            margin: 15px auto;
+            max-width: 420px;
+        }
+        .row {
+            display: flex;
+            justify-content: space-between;
+            padding: 6px 12px;
+            border-bottom: 1px dashed #5758bb;
+        }
+        .hidden { display: none; }
+        #timer {
+            font-size: 24px;
+            font-weight: bold;
+            color: var(--warn);
+            margin: 10px 0;
+        }
+        select {
+            padding: 10px;
+            width: 80%;
+            margin: 6px auto;
+            border-radius: 8px;
+            border: 1px solid #5758bb;
+            background: var(--neu);
+            color: var(--txt);
+            font-size: 16px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎵 Sala: <span id="room-title">...</span></h1>
+
+    <!-- PASO 1 (solo si falta el rol en la URL): elegir rol -->
+    <div id="p-login">
+        <p>Abre el enlace correcto: uno para presentador y otro para jugadores.</p>
+        <button class="btn btn-go" onclick="conectar('admin')">Entrar como Presentador</button><br>
+        <button class="btn" onclick="conectar('player')">Entrar como Jugador</button>
+    </div>
+
+    <!-- PASO 2: PANEL PRESENTADOR -->
+    <div id="p-admin" class="hidden">
+        <h3>Controles del Presentador</h3>
+        <input type="file" id="track" accept="audio/*"><br><br>
+        <h4>Tiempo de bloqueo:</h4>
+        <select id="time-selector">
+            <option value="20">20 segundos</option>
+            <option value="30">30 segundos</option>
+            <option value="40">40 segundos</option>
+            <option value="50">50 segundos</option>
+        </select><br>
+        <button class="btn btn-go" onclick="sonar()">▶️ Lanzar Canción</button>
+        <p id="status" style="font-weight:bold;">Estado: Esperando canción...</p>
+        <div class="box">
+            <h4>Decisión del Presentador:</h4>
+            <button class="btn btn-go" onclick="puntos(1)">✅ Acierto: Con Voz (+1 Pt)</button><br>
+            <button class="btn btn-go" onclick="puntos(2)">✅ Acierto: Instrumental (+2 Pts)</button><br>
+            <button class="btn btn-warn" onclick="fallo()">❌ Fallo: Bloquear y reabrir</button>
+        </div>
+        <button class="btn btn-stop" onclick="parar()">⏹️ Siguiente Canción / Reset</button>
+    </div>
+
+    <!-- PASO 3: PANEL JUGADORES -->
+    <div id="p-player" class="hidden">
+        <div id="p-join">
+            <input type="text" id="nick" placeholder="Tu Nombre o Apodo" style="padding:10px; width:80%;"><br><br>
+            <button class="btn btn-go" onclick="entrar()">Entrar a Jugar</button>
+        </div>
+        <div id="p-game" class="hidden">
+            <h3 id="user-title">Jugador</h3>
+            <div id="timer"></div>
+            <button id="pad" disabled onclick="pulsar()">BLOQUEADO</button>
+            <p id="pad-txt">Espera a que empiece...</p>
+        </div>
+    </div>
+
+    <!-- MARCADOR GENERAL -->
+    <div id="p-scores" class="hidden box">
+        <h3>🏆 Puntuaciones en Directo</h3>
+        <div id="log-buzz" style="color:#2ecc71; font-size:18px; font-weight:bold;"></div><br>
+        <div id="list-scores"></div>
+    </div>
+
+    <script>
+        // 🔹 CONFIGURACIÓN FIJA: pon aquí tu clave y el nombre de sala que quieras usar siempre.
+        const ABLY_KEY = "TPrqNg.rvP-xA:BVcZqQhOyOuU3uv3hrN1mpGOM6PPlLurFPpo5uR0BZk";
+        const SALA_FIJA = "PISTA MUSICAL BISIMBRE";
+
+        let ably, net, rol = '', miNombre = '';
+        let salaId = '', tabla = {}, primero = null;
+        let fallidos = [], source, ctx, countdownInterval = null;
+        let audioLocked = false;
+
+        function conectar(tipo) {
+            rol = tipo;
+            salaId = SALA_FIJA;
+            document.getElementById('room-title').innerText = salaId;
+
+            if (typeof Ably === 'undefined') {
+                return alert("Error: Ably no se ha cargado correctamente. Verifica tu conexión a internet.");
+            }
+
+            ably = new Ably.Realtime(ABLY_KEY);
+            net = ably.channels.get('room-' + salaId);
+            net.subscribe('ev', function(m) { leer(m.data); });
+
+            document.getElementById('p-login').classList.add('hidden');
+            if(rol === 'admin') {
+                document.getElementById('p-admin').classList.remove('hidden');
+                document.getElementById('p-scores').classList.remove('hidden');
+            } else {
+                document.getElementById('p-player').classList.remove('hidden');
+            }
+        }
+
+        function leer(data) {
+            if (!data || !data.t) return;
+
+            if(data.t === 'go') {
+                primero = null; fallidos = [];
+                audioLocked = true;
+                document.getElementById('log-buzz').innerText = "";
+                const time = data.time || 20;
+                document.getElementById('timer').innerText = time;
+
+                if(rol === 'player' && miNombre) {
+                    lock(true, "Música sonando... (" + time + "s)");
+                    startCountdown(time);
+                }
+            }
+
+            if(data.t === 'open') {
+                audioLocked = false;
+                if(rol === 'player' && miNombre) {
+                    clearCountdown();
+                    if(!primero && !fallidos.includes(miNombre)) {
+                        lock(false, "💥 ¡PULSA! 💥");
+                    }
+                }
+            }
+
+            if(data.t === 'hit') {
+                if(!primero) {
+                    primero = data.n;
+                    document.getElementById('log-buzz').innerText = "📢 " + primero + " está respondiendo...";
+                    if(rol === 'admin') {
+                        document.getElementById('status').innerText = "Responde: " + primero;
+                    }
+                }
+                if(rol === 'player') {
+                    lock(true, primero + " respondiendo...");
+                }
+            }
+
+            if(data.t === 'fail') {
+                fallidos.push(data.n); primero = null;
+                document.getElementById('log-buzz').innerText = "❌ " + data.n + " falló. ¡Sigue la ronda!";
+                if(rol === 'admin') {
+                    document.getElementById('status').innerText = "Falló: " + data.n + ". Esperando rebote...";
+                }
+                if(rol === 'player' && miNombre) {
+                    if(!fallidos.includes(miNombre)) {
+                        lock(false, "💥 ¡REBOTE! ¡PULSA! 💥");
+                    } else {
+                        lock(true, "Eliminado en esta canción");
+                    }
+                }
+            }
+
+            if(data.t === 'up') {
+                tabla = data.s || {};
+                verPuntos();
+            }
+
+            if(data.t === 'end') {
+                primero = null; fallidos = []; audioLocked = false;
+                clearCountdown();
+                document.getElementById('log-buzz').innerText = "";
+                if(rol === 'player') {
+                    lock(true, "Preparando siguiente tema...");
+                }
+                if(rol === 'admin') {
+                    document.getElementById('status').innerText = "Ronda terminada. Esperando nueva canción...";
+                }
+            }
+        }
+
+        function entrar() {
+            const n = document.getElementById('nick').value.trim();
+            if(!n) return;
+            miNombre = n;
+            document.getElementById('p-join').classList.add('hidden');
+            document.getElementById('p-game').classList.remove('hidden');
+            document.getElementById('p-scores').classList.remove('hidden');
+            document.getElementById('user-title').innerText = miNombre;
+            if(!tabla[miNombre]) {
+                tabla[miNombre] = 0;
+                net.publish('ev', {t:'up', s:tabla});
+            }
+        }
+
+        function lock(si, txt) {
+            const btn = document.getElementById('pad');
+            const txtEl = document.getElementById('pad-txt');
+            btn.disabled = si; btn.innerText = txt; txtEl.innerText = txt;
+        }
+
+        function pulsar() {
+            if(audioLocked) return;
+            net.publish('ev', {t:'hit', n:miNombre});
+        }
+
+        function sonar() {
+            const f = document.getElementById('track').files;
+            if(f.length === 0) return alert("Carga un archivo de música");
+
+            if(source) try { source.stop(); } catch(e) {}
+            if(ctx) try { ctx.close(); } catch(e) {}
+
+            const selectedTime = parseInt(document.getElementById('time-selector').value) || 20;
+
+            net.publish('ev', {t:'go', time: selectedTime});
+            document.getElementById('status').innerText = "Sonando... Bloqueado (" + selectedTime + "s)";
+
+            const r = new FileReader();
+            r.onload = function(e) {
+                ctx = new (window.AudioContext || window.webkitAudioContext)();
+                ctx.decodeAudioData(e.target.result)
+                    .then(function(b) {
+                        source = ctx.createBufferSource();
+                        source.buffer = b;
+                        source.connect(ctx.destination);
+                        source.start(0);
+
+                        setTimeout(function() {
+                            if(source) try { source.stop(); } catch(e) {}
+                            if(ctx) try { ctx.close(); } catch(e) {}
+                            net.publish('ev', {t:'open'});
+                            document.getElementById('status').innerText = "¡Pulsadores abiertos!";
+                        }, selectedTime * 1000);
+                    })
+                    .catch(function(err) {
+                        alert("Error al cargar el audio: " + err.message);
+                        net.publish('ev', {t:'end'});
+                        document.getElementById('status').innerText = "Error: Audio no válido";
+                    });
+            };
+            r.onerror = function() {
+                alert("Error al leer el archivo");
+                net.publish('ev', {t:'end'});
+            };
+            r.readAsArrayBuffer(f[0]);
+        }
+
+        function fallo() {
+            if(!primero) return alert("Nadie ha pulsado");
+            net.publish('ev', {t:'fail', n:primero});
+        }
+
+        function puntos(p) {
+            if(!primero) return alert("No hay jugador respondiendo");
+            if(!tabla[primero]) tabla[primero] = 0;
+            tabla[primero] += p;
+            net.publish('ev', {t:'up', s:tabla});
+            if(source) try { source.stop(); } catch(e) {}
+            if(ctx) try { ctx.close(); } catch(e) {}
+            net.publish('ev', {t:'end'});
+            document.getElementById('status').innerText = "Acierto. Ronda cerrada.";
+        }
+
+        function parar() {
+            clearCountdown();
+            if(source) try { source.stop(); } catch(e) {}
+            if(ctx) try { ctx.close(); } catch(e) {}
+            primero = null; fallidos = []; audioLocked = false;
+            net.publish('ev', {t:'end'});
+            document.getElementById('status').innerText = "Ronda reiniciada";
+        }
+
+        function verPuntos() {
+            const c = document.getElementById('list-scores');
+            c.innerHTML = "";
+            const lista = Object.entries(tabla).sort(function(a,b){return b[1]-a[1];});
+            for(let i = 0; i < lista.length; i++) {
+                let item = lista[i];
+                c.innerHTML += '<div class="row"><span>👤 ' + item[0] + '</span><strong>' + item[1] + ' Pts</strong></div>';
+            }
+        }
+
+        function startCountdown(seconds) {
+    clearCountdown();
+    let timeLeft = seconds;
+    document.getElementById('timer').innerText = timeLeft;
+    countdownInterval = setInterval(function() {
+        timeLeft--;
+        document.getElementById('timer').innerText = timeLeft;
+        if(timeLeft <= 0) {
+            clearCountdown();
+            if(rol === 'admin') {
+                net.publish('ev', {t:'open'});
+                document.getElementById('status').innerText = "¡Pulsadores abiertos!";
+            }
+            // 🔥 CORRECCIÓN: Desbloquear el botón del jugador AUTOMÁTICAMENTE
+            if(rol === 'player' && miNombre) {
+                lock(false, "💥 ¡PULSA! 💥");
+            }
+        }
+    }, 1000);
+}
+
+        function clearCountdown() {
+            if(countdownInterval) {
+                clearInterval(countdownInterval);
+                countdownInterval = null;
+            }
+            if(rol === 'player') {
+                document.getElementById('timer').innerText = "";
+            }
+        }
+
+        // 🔹 NUEVO: detecta el rol automáticamente desde la URL (?rol=admin o ?rol=player)
+        // y entra directamente sin pedir clave ni nombre de sala.
+        (function autoEntrada() {
+            const params = new URLSearchParams(window.location.search);
+            const rolUrl = params.get('rol');
+            if(rolUrl === 'admin' || rolUrl === 'player') {
+                conectar(rolUrl);
+            }
+        })();
+    </script>
+</body>
+</html>
